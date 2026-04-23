@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:latest
+    container_name: phish_redpanda
+    command:
+      - redpanda start
+      - --smp 1
+      - --memory 1G
+      - --reserve-memory 0M
+      - --overprovisioned
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+    ports:
+      - 19092:19092
+    volumes:
+      - ./data/redpanda:/var/lib/redpanda/data
+
+  mongo:
+    image: mongo:latest
+    container_name: phish_mongo
+    ports: ["27017:27017"]
+    mem_limit: 512m
+    volumes:
+      - ./data/mongo:/data/db
+
+  minio:
+    image: minio/minio
+    container_name: phish_minio
+    ports: ["9000:9000", "9001:9001"]
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: password123
+    volumes:
+      - ./data/minio:/data
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:19092

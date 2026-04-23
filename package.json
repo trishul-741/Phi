@@ -1,0 +1,16 @@
+{
+  "name": "phishguard-workspace",
+  "private": true,
+  "workspaces": [
+    "dashboard",
+    "extension",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:dashboard": "npm --workspace dashboard run dev",
+    "build:dashboard": "npm --workspace dashboard run build",
+    "dev:extension": "npm --workspace extension run dev",
+    "build:extension": "npm --workspace extension run build",
+    "typecheck": "npm --workspaces --if-present run typecheck"
+  }
+}

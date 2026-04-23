@@ -1,0 +1,14 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "types": [
+      "chrome"
+    ]
+  },
+  "include": [
+    "src",
+    "manifest.config.ts",
+    "vite.config.ts"
+  ]
+}
