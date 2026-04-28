@@ -33,21 +33,36 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("train")
 
 
-class LabelSmoothingBCE(nn.Module):
-    def __init__(self, pos_weight: torch.Tensor | None = None, smoothing: float = 0.1, reduction: str = "mean"):
+class AsymmetricLoss(nn.Module):
+    def __init__(self, gamma_neg=4, gamma_pos=1, clip=0.05, eps=1e-8, pos_weight: torch.Tensor | None = None, reduction: str = "mean"):
         super().__init__()
-        self.smoothing = smoothing
-        self.reduction = reduction
+        self.gamma_neg = gamma_neg
+        self.gamma_pos = gamma_pos
+        self.clip = clip
+        self.eps = eps
         self.pos_weight = pos_weight
+        self.reduction = reduction
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        targets_smooth = targets * (1 - self.smoothing) + 0.5 * self.smoothing
-        return F.binary_cross_entropy_with_logits(
-            logits,
-            targets_smooth,
-            pos_weight=self.pos_weight,
-            reduction=self.reduction,
-        )
+        probs = torch.sigmoid(logits)
+        
+        # L+ = (1 - p)^gamma_pos * log(p)
+        loss_pos = - (1 - probs) ** self.gamma_pos * torch.log(probs + self.eps)
+        if self.pos_weight is not None:
+            loss_pos = loss_pos * self.pos_weight
+            
+        # L- = p^gamma_neg * log(1 - p)
+        # Apply asymmetric clipping to negative probabilities if needed
+        # (Though we can just use the standard focal term)
+        loss_neg = - (probs) ** self.gamma_neg * torch.log(1 - probs + self.eps)
+        
+        loss = targets * loss_pos + (1 - targets) * loss_neg
+        
+        if self.reduction == "mean":
+            return loss.mean()
+        elif self.reduction == "sum":
+            return loss.sum()
+        return loss
 
 
 class EarlyStopping:
@@ -99,7 +114,7 @@ def compute_val_metrics(y_true: np.ndarray, y_probs: np.ndarray, threshold: floa
 def search_optimal_threshold_fpr(
     y_true: np.ndarray,
     y_probs: np.ndarray,
-    max_fpr: float = 0.03,
+    max_fpr: float = 0.005,
     sweep_start: float = 0.20,
     sweep_end: float = 0.70,
     sweep_step: float = 0.02,
@@ -237,14 +252,16 @@ def train():
         weight_decay=cfg.WEIGHT_DECAY,
     )
 
-    criterion = LabelSmoothingBCE(
+    criterion = AsymmetricLoss(
+        gamma_neg=4,
+        gamma_pos=1,
         pos_weight=pos_weight_adjusted.to(device),
-        smoothing=cfg.LABEL_SMOOTHING,
         reduction="mean",
     )
-    criterion_none = LabelSmoothingBCE(
+    criterion_none = AsymmetricLoss(
+        gamma_neg=4,
+        gamma_pos=1,
         pos_weight=pos_weight_adjusted.to(device),
-        smoothing=cfg.LABEL_SMOOTHING,
         reduction="none",
     )
 
@@ -328,7 +345,7 @@ def train():
         y_true_np = np.array(all_val_labels)
         y_probs_np = np.array(all_val_probs)
         val_loss = val_running_loss / max(val_total, 1)
-        threshold, sweep_recall, sweep_fpr = search_optimal_threshold_fpr(y_true_np, y_probs_np, max_fpr=0.03)
+        threshold, sweep_recall, sweep_fpr = search_optimal_threshold_fpr(y_true_np, y_probs_np, max_fpr=0.005)
         metrics = compute_val_metrics(y_true_np, y_probs_np, threshold)
 
         scheduler.step(metrics["f2"])

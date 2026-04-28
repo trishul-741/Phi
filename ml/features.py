@@ -264,14 +264,12 @@ def _extract_text_features(text_clean: str, text_raw: str, page_netloc: str = ""
 
 
 ALL_FEATURE_NAMES = [
-    "url_length", "domain_length", "path_length", "num_dots", "num_hyphens",
-    "num_at", "num_question", "num_ampersand", "num_digits", "has_ip",
-    "domain_entropy", "num_subdomains", "subdomain_depth", "brand_impersonation_score",
-    "text_length", "word_count", "login_kw_density", "has_hidden_iframe",
-    "form_action_density", "external_link_ratio", "is_modern_spa",
-    "has_password_field", "num_password_fields", "title_mismatch",
-    "same_domain_form_action_ratio", "num_iframes", "num_hidden_inputs",
-    "submit_button_count", "domain_title_token_overlap",
+    "url_length", "domain_length", "num_dots", "num_hyphens",
+    "num_at", "has_ip", "domain_entropy", "subdomain_depth",
+    "brand_impersonation_score", "text_length", "login_kw_density",
+    "has_hidden_iframe", "external_link_ratio", "is_modern_spa",
+    "has_password_field", "title_mismatch", "same_domain_form_action_ratio",
+    "num_hidden_inputs", "domain_title_token_overlap",
 ]
 
 

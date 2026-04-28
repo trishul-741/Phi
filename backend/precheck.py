@@ -5,10 +5,12 @@ from datetime import datetime, timezone
 from typing import Iterable
 from urllib.parse import urlparse
 
+import re
 import tldextract
 
 from backend.schemas import PrecheckResponse
 
+_RE_IP = re.compile(r"\d{1,3}(?:\.\d{1,3}){3}")
 _TLD = tldextract.TLDExtract(suffix_list_urls=None)
 _KEYWORDS = {
     "login",
@@ -40,6 +42,11 @@ _BRANDS = {
     "wellsfargo",
     "dhl",
     "fedex",
+}
+_SSO_WHITELIST = {
+    "login.microsoftonline.com",
+    "okta.com",
+    "aws.amazon.com",
 }
 
 
@@ -100,11 +107,15 @@ def score_url_risk(url: str) -> tuple[float, list[str]]:
     if not parsed.host:
         return 0.45, ["empty_host"]
 
-    if parsed.host.replace(".", "").isdigit():
+    if _RE_IP.search(parsed.host):
         return 0.97, ["ip_hostname"]
 
     lowered = url.lower()
     search_area = f"{parsed.host} {parsed.path}".lower()
+
+    for sso in _SSO_WHITELIST:
+        if sso in search_area or domain_matches(parsed.host, [sso]):
+            return 0.05, ["sso_whitelist"]
 
     if parsed.scheme == "http":
         risk += 0.08

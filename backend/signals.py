@@ -68,38 +68,13 @@ def derive_verdict(
 ) -> StageVerdict:
     risky_filter = filter_reason not in {"model_only", "whitelist_bypass"}
     safe_cutoff = max(0.18, threshold - 0.15)
-    evidence = summarize_signal_evidence(grouped_signals)
-    has_high_confidence_malicious_evidence = (
-        evidence["strong_malicious_count"] >= 2
-        or (
-            evidence["strong_malicious_count"] >= 1
-            and evidence["supporting_signal_count"] >= 2
-        )
-    )
-
+    
     if final_score >= threshold:
-        # Near-threshold model-only spikes without strong corroborating evidence are
-        # a recurring false-positive source on safe branded portals. Keep them in a
-        # reviewable suspicious band instead of convicting them outright.
-        if (
-            filter_reason == "model_only"
-            and not has_high_confidence_malicious_evidence
-            and final_score < threshold + 0.08
-        ):
-            return "suspicious"
         return "malicious"
-
-    # When the score is just under the action threshold but the page carries
-    # multiple high-confidence malicious URL/DOM signals, promote it upward so
-    # obvious phishing kits are not softened into benign classifications.
-    if (
-        filter_reason != "whitelist_bypass"
-        and has_high_confidence_malicious_evidence
-        and final_score >= max(safe_cutoff, threshold - 0.08)
-    ):
-        return "malicious"
+    
     if final_score >= safe_cutoff or risky_filter:
         return "suspicious"
+        
     return "safe"
 
 
@@ -113,6 +88,10 @@ def resolve_consistency(
         if stage1_reason in {"trusted_domain", "whitelist_bypass"}:
             return "needs_review", "conflict", "trusted_safe_stage1_conflict"
         return "needs_review", "conflict", "stage1_safe_stage2_malicious"
+        
+    if stage1_verdict == "malicious" and stage2_verdict == "safe":
+        return "needs_review", "conflict", "stage1_malicious_stage2_safe"
+
     return stage2_verdict, "consistent", "aligned_stage_decision"
 
 
