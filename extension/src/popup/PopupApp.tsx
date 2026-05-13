@@ -1,4 +1,4 @@
-import type { LocalScanRecord } from "@phishguard/shared";
+import type { LocalScanRecord, Verdict } from "@phishguard/shared";
 import { formatTimestamp, getDomainLabel, scoreToPercent, verdictLabel } from "@phishguard/shared";
 import { useEffect, useMemo, useState } from "react";
 
@@ -10,6 +10,13 @@ import { getScanHistory } from "../lib/storage";
 async function getActiveTabUrl(): Promise<string | undefined> {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   return tab?.url;
+}
+
+function displayVerdict(scan: LocalScanRecord): Verdict {
+  if ((scan.verdict === "needs_review" || scan.consistency_status === "conflict") && scan.stage2_verdict) {
+    return scan.stage2_verdict;
+  }
+  return scan.verdict;
 }
 
 export function PopupApp() {
@@ -83,8 +90,11 @@ export function PopupApp() {
   };
 
   const currentSummary = currentScan
-    ? currentScan.recommendation
+    ? currentScan.verdict === "needs_review" || currentScan.consistency_status === "conflict"
+      ? "Showing the actual Stage 2 full-scan result. The stored final state remains review-safe because Stage 1 and Stage 2 disagreed."
+      : currentScan.recommendation
     : "PhishGuard shows passive protection on low-risk pages and escalates only when non-visual risk increases.";
+  const currentDisplayVerdict = currentScan ? displayVerdict(currentScan) : null;
   const historyLabel = history.length === 1 ? "1 item" : `${history.length} items`;
 
   return (
@@ -96,7 +106,7 @@ export function PopupApp() {
             <h1>Current page review</h1>
             <p className="phishguard-panel-copy">Immediate protection for the active browser tab.</p>
           </div>
-          {currentScan ? <VerdictBadge verdict={currentScan.verdict} /> : <span className="phishguard-mini-status">Awaiting scan</span>}
+          {currentDisplayVerdict ? <VerdictBadge verdict={currentDisplayVerdict} /> : <span className="phishguard-mini-status">Awaiting scan</span>}
         </div>
 
         <div className="phishguard-domain-lockup">
@@ -111,8 +121,8 @@ export function PopupApp() {
           <>
             <div className="phishguard-stat-grid phishguard-stat-grid-compact">
               <div className="phishguard-stat-card">
-                <span className="phishguard-label">Final decision</span>
-                <strong className="phishguard-stat-value">{verdictLabel(currentScan.verdict)}</strong>
+                <span className="phishguard-label">System result</span>
+                <strong className="phishguard-stat-value">{verdictLabel(currentDisplayVerdict ?? currentScan.verdict)}</strong>
               </div>
               <div className="phishguard-stat-card">
                 <span className="phishguard-label">Final score</span>

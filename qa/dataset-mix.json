@@ -1,0 +1,54 @@
+{
+  "name": "phishguard-heavy-data-eval",
+  "description": "Large-scale defensive QA distribution for PhishGuard.",
+  "safety_rules": [
+    "Do not generate, host, modify, deploy, or interact with phishing pages.",
+    "Do not collect credentials.",
+    "Do not bypass login protections.",
+    "Use browser automation only for legitimate sites, official test pages, and local benign fixtures.",
+    "Use API-only evaluation for live phishing-feed URLs."
+  ],
+  "distribution": {
+    "legitimate_safe": {
+      "percent": 70,
+      "count_10000": 7000,
+      "count_20000": 14000,
+      "sources": [
+        "Tranco top domains",
+        "banking homepages only",
+        "SaaS platforms",
+        "e-commerce sites",
+        "news websites",
+        "government websites",
+        "education/documentation sites",
+        "legitimate login pages"
+      ]
+    },
+    "phishing_malicious_official_test": {
+      "percent": 15,
+      "count_10000": 1500,
+      "count_20000": 3000,
+      "sources": [
+        "PhishTank URL datasets",
+        "OpenPhish URL datasets",
+        "Kaggle phishing URL datasets",
+        "Google Safe Browsing official test URLs",
+        "AMTSO phishing test page",
+        "Microsoft SmartScreen demo/test pages"
+      ],
+      "handling": "API-only for live feed URLs; browser testing only for official safe test pages."
+    },
+    "synthetic_suspicious": {
+      "percent": 15,
+      "count_10000": 1500,
+      "count_20000": 3000,
+      "sources": [
+        "reserved example.com/example.net/example.org domains",
+        "private IP string fixtures",
+        "benign local HTML fixtures"
+      ],
+      "handling": "Safe lexical stress tests only; no hosted credential collection pages."
+    }
+  },
+  "production_note": "Real internet traffic can be 90-95% legitimate, so final reports should include both this 70/30 evaluation view and a production-weighted interpretation."
+}

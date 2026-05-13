@@ -41,6 +41,28 @@ import {
 const ongoingScans = new Map<string, Promise<void>>();
 const PRECHECK_FULL_SCAN_THRESHOLD = 0.25;
 
+function getErrorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isErrorResponse(value: unknown): value is { error: string } {
+  return isRecord(value) && typeof value.error === "string";
+}
+
+function isPageContentPayload(value: unknown): value is PageContentPayload {
+  return (
+    isRecord(value) &&
+    typeof value.url === "string" &&
+    typeof value.title === "string" &&
+    typeof value.text_clean === "string" &&
+    typeof value.text_raw === "string"
+  );
+}
+
 function emptySignals() {
   return {
     url_signals: [],
@@ -117,7 +139,7 @@ async function requestPageContent(
   stabilityDelayMs: number,
   stabilityTimeoutMs: number,
 ): Promise<PageContentPayload> {
-  const response = (await sendTabMessage(tabId, {
+  const response = await sendTabMessage(tabId, {
     type: "REQUEST_PAGE_CONTENT",
     payload: {
       maxVisibleTextChars,
@@ -126,9 +148,12 @@ async function requestPageContent(
       stabilityDelayMs,
       stabilityTimeoutMs,
     },
-  })) as PageContentPayload | undefined;
+  });
 
-  if (!response) {
+  if (isErrorResponse(response)) {
+    throw new Error(response.error);
+  }
+  if (!isPageContentPayload(response)) {
     throw new Error("PhishGuard could not read page content from the current tab.");
   }
   return response;
@@ -352,7 +377,7 @@ async function runTwoStageScan(tabId: number, url: string, title: string, force 
       await sendTabMessage(tabId, {
         type: "SHOW_SCAN_ERROR",
         payload: {
-          message: error instanceof Error ? error.message : "Stage 1 precheck failed.",
+          message: getErrorMessage(error, "Stage 1 precheck failed."),
         },
       });
       return;
@@ -432,7 +457,7 @@ async function runTwoStageScan(tabId: number, url: string, title: string, force 
       await sendTabMessage(tabId, {
         type: "SHOW_SCAN_ERROR",
         payload: {
-          message: error instanceof Error ? error.message : "Full scan failed.",
+          message: getErrorMessage(error, "Full scan failed."),
         },
       });
     }
@@ -455,79 +480,86 @@ chrome.runtime.onStartup.addListener(() => {
 
 chrome.runtime.onMessage.addListener((message: RuntimeMessage, sender, sendResponse) => {
   void (async () => {
-    if (message.type === "PAGE_READY") {
-      if (sender.tab?.id) {
-        await runTwoStageScan(sender.tab.id, message.payload.url, message.payload.title);
-      }
-      sendResponse({ ok: true });
-      return;
-    }
-
-    if (message.type === "GET_CURRENT_SCAN") {
-      const scan = await resolveScanForUrl(message.payload.url);
-      sendResponse(scan ?? null);
-      return;
-    }
-
-    if (message.type === "RESCAN_URL") {
-      const tabId =
-        sender.tab?.id ??
-        (await chrome.tabs.query({ active: true, currentWindow: true })).find((tab) => tab.url === message.payload.url)?.id;
-      if (tabId) {
-        const settings = await getSettings();
-        await clearCacheForUrl(message.payload.url);
-        if (settings.rescanDebounceMs > 0) {
-          await new Promise((resolve) => globalThis.setTimeout(resolve, settings.rescanDebounceMs));
-        }
-        await runTwoStageScan(tabId, message.payload.url, "", true);
-      }
-      sendResponse({ ok: true });
-      return;
-    }
-
-    if (message.type === "OPEN_DASHBOARD") {
-      await openDashboard(message.payload.url, message.payload.scanId);
-      sendResponse({ ok: true });
-      return;
-    }
-
-    if (message.type === "OVERLAY_ACTION") {
-      const scan = await resolveScanForUrl(message.payload.url, message.payload.scanId);
-      if (message.payload.action === "add_to_whitelist") {
-        await handleWhitelist(message.payload.url, scan);
-        if (scan) {
-          await handleManualAction(sender.tab?.id, "add_to_whitelist", message.payload.url, scan);
-        }
+    try {
+      if (message.type === "PAGE_READY") {
         if (sender.tab?.id) {
-          await sendTabMessage(sender.tab.id, { type: "CLEAR_PAGE_UI" });
-          if (scan) {
-            await showSafeIndicator(sender.tab.id, { ...scan, verdict: "safe" }, "trusted_domain");
-          }
+          await runTwoStageScan(sender.tab.id, message.payload.url, message.payload.title);
         }
-      } else {
-        await handleManualAction(sender.tab?.id, message.payload.action, message.payload.url, scan);
+        sendResponse({ ok: true });
+        return;
       }
-      if (message.payload.action === "report_phishing") {
-        await openDashboard(message.payload.url, scan?.scan_id);
+
+      if (message.type === "GET_CURRENT_SCAN") {
+        const scan = await resolveScanForUrl(message.payload.url);
+        sendResponse(scan ?? null);
+        return;
       }
-      sendResponse({ ok: true });
-      return;
-    }
 
-    if (message.type === "GET_SETTINGS") {
-      sendResponse(await getSettings());
-      return;
-    }
+      if (message.type === "RESCAN_URL") {
+        const tabId =
+          sender.tab?.id ??
+          (await chrome.tabs.query({ active: true, currentWindow: true })).find((tab) => tab.url === message.payload.url)?.id;
+        if (tabId) {
+          const settings = await getSettings();
+          await clearCacheForUrl(message.payload.url);
+          if (settings.rescanDebounceMs > 0) {
+            await new Promise((resolve) => globalThis.setTimeout(resolve, settings.rescanDebounceMs));
+          }
+          await runTwoStageScan(tabId, message.payload.url, "", true);
+        }
+        sendResponse({ ok: true });
+        return;
+      }
 
-    if (message.type === "SAVE_SETTINGS") {
-      const saved = await saveSettings(message.payload);
-      sendResponse(saved);
-      return;
-    }
+      if (message.type === "OPEN_DASHBOARD") {
+        await openDashboard(message.payload.url, message.payload.scanId);
+        sendResponse({ ok: true });
+        return;
+      }
 
-    if (message.type === "GET_LOCAL_SNAPSHOT") {
-      sendResponse(await buildLocalSnapshot());
-      return;
+      if (message.type === "OVERLAY_ACTION") {
+        const scan = await resolveScanForUrl(message.payload.url, message.payload.scanId);
+        if (message.payload.action === "add_to_whitelist") {
+          await handleWhitelist(message.payload.url, scan);
+          if (scan) {
+            await handleManualAction(sender.tab?.id, "add_to_whitelist", message.payload.url, scan);
+          }
+          if (sender.tab?.id) {
+            await sendTabMessage(sender.tab.id, { type: "CLEAR_PAGE_UI" });
+            if (scan) {
+              await showSafeIndicator(sender.tab.id, { ...scan, verdict: "safe" }, "trusted_domain");
+            }
+          }
+        } else {
+          await handleManualAction(sender.tab?.id, message.payload.action, message.payload.url, scan);
+        }
+        if (message.payload.action === "report_phishing") {
+          await openDashboard(message.payload.url, scan?.scan_id);
+        }
+        sendResponse({ ok: true });
+        return;
+      }
+
+      if (message.type === "GET_SETTINGS") {
+        sendResponse(await getSettings());
+        return;
+      }
+
+      if (message.type === "SAVE_SETTINGS") {
+        const saved = await saveSettings(message.payload);
+        sendResponse(saved);
+        return;
+      }
+
+      if (message.type === "GET_LOCAL_SNAPSHOT") {
+        sendResponse(await buildLocalSnapshot());
+        return;
+      }
+
+      sendResponse({ ok: false, error: "Unsupported PhishGuard message." });
+    } catch (error) {
+      console.error("[PhishGuard] Runtime message failed", error);
+      sendResponse({ ok: false, error: getErrorMessage(error, "PhishGuard request failed.") });
     }
   })();
 

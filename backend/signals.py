@@ -16,6 +16,9 @@ _FILTER_REASON_LABELS = {
     "model_only": ("Model-driven risk", "The fused non-visual model carried the decision without extra filter overrides."),
     "plaintext_http": ("Plain HTTP", "The page uses plain HTTP instead of HTTPS."),
     "credential_lure_terms": ("Credential lure terms", "The URL includes account or verification language often used in phishing."),
+    "official_security_test": ("Official security test", "The URL matches a public security-test page intended to verify phishing protection behavior."),
+    "public_hosting_platform": ("Public hosting platform", "The URL is hosted on a user-content platform commonly abused for disposable phishing pages."),
+    "suspicious_tld": ("Suspicious TLD", "The URL uses a top-level domain that frequently appears in abuse reports and needs supporting evidence."),
 }
 
 _STRONG_MALICIOUS_SIGNAL_KEYS = {

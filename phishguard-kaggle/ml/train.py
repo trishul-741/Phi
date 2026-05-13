@@ -2,9 +2,10 @@
 Training loop for the non-visual PhishGuard fusion classifier.
 
 Key updates:
-- saves scaler artifact for calibration / inference reuse
-- metadata explicitly describes non-visual deployment path
-- calibration split is held out from training and validation
+- Implements AsymmetricLoss to heavily penalize False Positives.
+- Caps acceptable FPR at 0.5% during threshold optimization.
+- Fixes AdamW stalling by explicitly filtering frozen parameters.
+- Restores proper dataset class balancing.
 """
 
 from __future__ import annotations
@@ -19,7 +20,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from sklearn.metrics import classification_report, confusion_matrix, f1_score, fbeta_score, precision_score, recall_score
 from torch.amp import GradScaler, autocast
 
@@ -45,19 +45,22 @@ class AsymmetricLoss(nn.Module):
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         probs = torch.sigmoid(logits)
-        
-        # L+ = (1 - p)^gamma_pos * log(p)
-        loss_pos = - (1 - probs) ** self.gamma_pos * torch.log(probs + self.eps)
+        probs_pos = probs
+        probs_neg = 1 - probs
+
+        targets_pos = targets
+        targets_neg = 1 - targets
+
+        probs_neg = (probs_neg + self.clip).clamp(max=1)
+
+        loss_pos = -targets_pos * torch.pow(1 - probs_pos, self.gamma_pos) * torch.log(probs_pos + self.eps)
+        loss_neg = -targets_neg * torch.pow(1 - probs_neg, self.gamma_neg) * torch.log(probs_neg + self.eps)
+
         if self.pos_weight is not None:
             loss_pos = loss_pos * self.pos_weight
-            
-        # L- = p^gamma_neg * log(1 - p)
-        # Apply asymmetric clipping to negative probabilities if needed
-        # (Though we can just use the standard focal term)
-        loss_neg = - (probs) ** self.gamma_neg * torch.log(1 - probs + self.eps)
-        
-        loss = targets * loss_pos + (1 - targets) * loss_neg
-        
+
+        loss = loss_pos + loss_neg
+
         if self.reduction == "mean":
             return loss.mean()
         elif self.reduction == "sum":
@@ -116,8 +119,8 @@ def search_optimal_threshold_fpr(
     y_probs: np.ndarray,
     max_fpr: float = 0.005,
     sweep_start: float = 0.20,
-    sweep_end: float = 0.70,
-    sweep_step: float = 0.02,
+    sweep_end: float = 0.95,
+    sweep_step: float = 0.01,
 ) -> tuple[float, float, float]:
     y_bin = (y_true >= 0.5).astype(int)
     best_threshold = cfg.DECISION_THRESHOLD
@@ -219,20 +222,15 @@ def train():
     logger.info("Saved scaler -> %s", cfg.scaler_path)
     logger.info("Selected %d statistical features", stat_feature_dim)
 
-    # Reuse the class balance computed from the raw training split.
-    # Deriving weights from the train loader would sample MixUp-softened labels,
-    # which shifts the positive/negative ratio away from the real dataset.
-    pos_weight_adjusted = (pos_weight / max(cfg.FP_PENALTY_WEIGHT, 1e-8)).clone().detach()
-    logger.info(
-        "Using train-split pos_weight %.4f adjusted to %.4f for FP control",
-        float(pos_weight.item()),
-        float(pos_weight_adjusted.item()),
-    )
+    # Use exact class balancing from dataset. Do not divide by arbitrary penalty weights.
+    pos_weight_adjusted = pos_weight.clone().detach()
+    logger.info(f"Using class pos_weight: {float(pos_weight_adjusted.item()):.4f}")
 
     model = PhishGuardNet(stat_feature_dim=stat_feature_dim).to(device)
     params_info = count_parameters(model)
     logger.info("Model params: %s", params_info)
 
+    # Extract parameters for differential learning rates
     bert_layers = model.content_bert.bert.transformer.layer
     layers_0_to_2, layers_3_to_5 = [], []
     for i in range(3):
@@ -243,26 +241,28 @@ def train():
     bert_param_ids = {id(p) for p in model.content_bert.bert.parameters()}
     head_params = [p for p in model.parameters() if id(p) not in bert_param_ids and p.requires_grad]
 
-    optimizer = torch.optim.AdamW(
-        [
-            {"params": layers_0_to_2, "lr": cfg.BERT_LR * 0.1},
-            {"params": layers_3_to_5, "lr": cfg.BERT_LR * 0.3},
-            {"params": head_params, "lr": cfg.HEAD_LR},
-        ],
-        weight_decay=cfg.WEIGHT_DECAY,
-    )
+    # Explicitly filter out frozen parameters to prevent AdamW momentum stalls
+    layers_0_to_2 = [p for p in layers_0_to_2 if p.requires_grad]
+    layers_3_to_5 = [p for p in layers_3_to_5 if p.requires_grad]
 
+    param_groups = []
+    if layers_0_to_2:
+        param_groups.append({"params": layers_0_to_2, "lr": cfg.BERT_LR * 0.1})
+    if layers_3_to_5:
+        param_groups.append({"params": layers_3_to_5, "lr": cfg.BERT_LR * 0.3})
+    if head_params:
+        param_groups.append({"params": head_params, "lr": cfg.HEAD_LR})
+
+    optimizer = torch.optim.AdamW(param_groups, weight_decay=cfg.WEIGHT_DECAY)
+
+    # AsymmetricLoss handles heavily penalizing false positives (gamma_neg > gamma_pos)
     criterion = AsymmetricLoss(
-        gamma_neg=4,
-        gamma_pos=1,
         pos_weight=pos_weight_adjusted.to(device),
-        reduction="mean",
+        gamma_neg=4, gamma_pos=1, reduction="mean"
     )
     criterion_none = AsymmetricLoss(
-        gamma_neg=4,
-        gamma_pos=1,
         pos_weight=pos_weight_adjusted.to(device),
-        reduction="none",
+        gamma_neg=4, gamma_pos=1, reduction="none"
     )
 
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -345,11 +345,12 @@ def train():
         y_true_np = np.array(all_val_labels)
         y_probs_np = np.array(all_val_probs)
         val_loss = val_running_loss / max(val_total, 1)
+        
+        # Max FPR strictly capped at 0.005 (0.5%)
         threshold, sweep_recall, sweep_fpr = search_optimal_threshold_fpr(y_true_np, y_probs_np, max_fpr=0.005)
         metrics = compute_val_metrics(y_true_np, y_probs_np, threshold)
 
         scheduler.step(metrics["f2"])
-        train_losses.append(train_loss) if False else None
         val_losses.append(val_loss)
         val_accs.append(metrics["accuracy"])
         thresholds.append(threshold)

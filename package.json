@@ -11,6 +11,15 @@
     "build:dashboard": "npm --workspace dashboard run build",
     "dev:extension": "npm --workspace extension run dev",
     "build:extension": "npm --workspace extension run build",
+    "qa:api": "node qa/run-api-smoke.mjs",
+    "qa:generate-labeled": "node qa/scripts/generate-datasets-from-metadata.mjs",
+    "qa:generate-synthetic": "node qa/scripts/generate-synthetic-dataset.mjs",
+    "qa:normalize": "node qa/scripts/normalize-dataset.mjs",
+    "qa:build-dataset": "node qa/scripts/build-eval-dataset.mjs",
+    "qa:batch": "node qa/scripts/run-api-batch.mjs",
+    "qa:metrics": "node qa/scripts/compute-metrics.mjs",
+    "qa:report": "node qa/scripts/generate-report.mjs",
+    "qa:detailed-report": "node qa/scripts/generate-detailed-eval-report.mjs",
     "typecheck": "npm --workspaces --if-present run typecheck"
   }
 }

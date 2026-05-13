@@ -41,90 +41,10 @@ logger = logging.getLogger("safe_filter")
 # Common brands often impersonated in phishing attacks
 # Expand this list in production based on CTI feeds.
 TARGETED_BRANDS = {
-    "adobe", "allegro", "allegrolokalnie", "apple", "amazon", "bankofamerica",
-    "binance", "bmw", "chase", "coinbase", "dhl", "edf", "exodus", "facebook", "fedex",
-    "google", "icloud", "ing", "instagram", "kucoin", "ledger", "linkedin",
-    "metamask", "microsoft", "netflix", "paypal", "telegram", "ups", "usps",
-    "trezor", "wellsfargo", "whatsapp",
+    "paypal", "apple", "microsoft", "google", "amazon", 
+    "facebook", "netflix", "chase", "bankofamerica", "wellsfargo",
+    "linkedin", "dhl", "fedex", "instagram", "whatsapp",
 }
-
-BRAND_ALIASES = {
-    "allegro": {"alegro", "allegrolo", "allegrolokalnie"},
-    "exodus": {"exodos", "exodues", "exodocus"},
-    "facebook": {"facebooks", "facebok", "facbook"},
-    "ledger": {"ledgr"},
-    "microsoft": {"microsft", "mircosoft"},
-    "paypal": {"p0aypal", "paipal", "paqpal", "pahypal", "pay0al", "pay6pal", "payal", "payapal", "paylal", "payoal", "payopal", "paypan", "payqal", "pypal"},
-    "telegram": {"telegramnco"},
-    "whatsapp": {"webwhatsapp", "whatsap"},
-}
-
-USER_CONTENT_PLATFORMS = {
-    "appwrite.network", "blogspot.com", "cloudfront.net", "edgeone.dev",
-    "firebaseapp.com", "framer.ai", "framer.app", "github.io", "godaddysites.com",
-    "ghost.io", "netlify.app", "pages.dev", "sitebeat.crazydomains.com",
-    "square.site", "typedream.app", "vercel.app", "web.app", "webflow.io",
-    "weebly.com", "weeblysite.com", "wixsite.com", "wixstudio.com",
-    "workers.dev", "zapier.app",
-}
-
-HIGH_RISK_TLDS = {
-    "buzz", "click", "cn", "cyou", "icu", "lol", "mom", "rest", "sbs",
-    "top", "xyz",
-}
-
-SUSPICIOUS_TLDS = {
-    "app", "buzz", "click", "cn", "cyou", "icu", "info", "live", "lol",
-    "mom", "rest", "sbs", "shop", "top", "xyz",
-}
-
-OFFICIAL_SECURITY_TESTS = {
-    "testsafebrowsing.appspot.com": ("phishing", "malware", "billing", "uws"),
-    "demo.smartscreen.msft.net": (),
-    "amtso.org": ("phishing", "feature-settings-check-phishing-page"),
-}
-RESERVED_TEST_DOMAINS = {
-    "example.com",
-    "example.net",
-    "example.org",
-}
-TOP_DOMAIN_STRONG_REASONS = {
-    "hostname_length",
-    "public_hosting_platform",
-    "subdomain_depth",
-    "suspicious_tld",
-}
-
-def _levenshtein_at_most(value: str, target: str, limit: int) -> bool:
-    if abs(len(value) - len(target)) > limit:
-        return False
-
-    previous = list(range(len(target) + 1))
-    for i, char in enumerate(value, start=1):
-        current = [i]
-        row_min = current[0]
-        for j, target_char in enumerate(target, start=1):
-            cost = 0 if char == target_char else 1
-            current.append(min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + cost))
-            row_min = min(row_min, current[-1])
-        if row_min > limit:
-            return False
-        previous = current
-    return previous[-1] <= limit
-
-
-def _contains_brand_impersonation(url_lower: str, registered_domain: str) -> bool:
-    registered_base = registered_domain.split(".")[0]
-    tokens = [token for token in re.split(r"[^a-z0-9]+", url_lower) if token]
-
-    for brand in TARGETED_BRANDS:
-        if registered_base == brand:
-            continue
-        if brand in tokens:
-            return True
-        if any(alias in url_lower for alias in BRAND_ALIASES.get(brand, set())):
-            return True
-    return False
 
 class SafeFilter:
     def __init__(self, top_k=100_000, cache_dir=None):
@@ -186,12 +106,13 @@ class SafeFilter:
         
         # registered_domain will be something like "google.com" or "bbc.co.uk"
         registered_domain = f"{extracted.domain}.{extracted.suffix}" if extracted.suffix else extracted.domain
-
-        for test_host, markers in OFFICIAL_SECURITY_TESTS.items():
-            if (registered_domain == test_host or url_lower.startswith(f"http://{test_host}") or test_host in url_lower) and (not markers or any(marker in url_lower for marker in markers)):
-                return (max(0.90, model_score), "official_security_test")
-
-        # --- 1. HEURISTIC PRE-FILTERS ---
+        
+        # --- 1. ALEXA / TRANCO TOP DOMAIN CHECK ---
+        if registered_domain in self.top_domains:
+            # High confidence it is legitimate
+            return (0.05, "whitelist_bypass")
+            
+        # --- 2. HEURISTIC PRE-FILTERS ---
         # Is it an IP address hostname? (tldextract parses IPs into the `domain` field with no suffix)
         is_ip = re.match(r"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$", extracted.domain) and not extracted.suffix
         if is_ip:
@@ -204,39 +125,22 @@ class SafeFilter:
         # Hostname length check
         hostname = f"{extracted.subdomain}.{registered_domain}" if extracted.subdomain else registered_domain
         if len(hostname) > 50:
-            adjusted_score += 0.20
+            adjusted_score += 0.15
             reasons.append("hostname_length")
             
         # Subdomain depth check
         if extracted.subdomain:
             sub_count = len(extracted.subdomain.split("."))
             if sub_count > 3:
-                adjusted_score += 0.20
+                adjusted_score += 0.10
                 reasons.append("subdomain_depth")
-
-        if registered_domain in USER_CONTENT_PLATFORMS and extracted.subdomain:
-            adjusted_score += 0.20
-            reasons.append("public_hosting_platform")
-
-        if extracted.suffix in SUSPICIOUS_TLDS:
-            adjusted_score += 0.15 if extracted.suffix in HIGH_RISK_TLDS else 0.10
-            reasons.append("suspicious_tld")
-
-        # Brand impersonation check, including common typo variants.
-        if _contains_brand_impersonation(url_lower, registered_domain):
-            adjusted_score += 0.35
-            reasons.append("brand_impersonation")
-
-        # --- 2. ALEXA / TRANCO TOP DOMAIN CHECK ---
-        # Keep the false-positive guard, but do not let it suppress concrete
-        # phishing evidence on trusted or reserved domains used in QA fixtures.
-        if (
-            registered_domain in self.top_domains
-            and registered_domain not in USER_CONTENT_PLATFORMS
-            and registered_domain not in RESERVED_TEST_DOMAINS
-            and not any(reason in TOP_DOMAIN_STRONG_REASONS for reason in reasons)
-        ):
-            return (0.05, "whitelist_bypass")
+                
+        # Brand impersonation check (Brand in URL but NOT the registered domain)
+        for brand in TARGETED_BRANDS:
+            if brand in url_lower and extracted.domain != brand:
+                adjusted_score += 0.20
+                reasons.append("brand_impersonation")
+                break
                 
         # --- 3. FINAL ADJUSTMENT ---
         if adjusted_score > model_score:

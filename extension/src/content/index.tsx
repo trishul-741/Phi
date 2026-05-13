@@ -1,4 +1,4 @@
-import type { LocalDashboardSnapshot, LocalScanRecord, UserAction } from "@phishguard/shared";
+import type { LocalDashboardSnapshot, LocalScanRecord, StageVerdict, UserAction, Verdict } from "@phishguard/shared";
 import {
   formatTimestamp,
   getDomainLabel,
@@ -164,19 +164,28 @@ async function waitForStablePage(
 
 function overlayHeadline(scan: LocalScanRecord) {
   if (scan.verdict === "needs_review" || scan.consistency_status === "conflict") {
-    return "Conflicting scan signals detected";
+    return scan.stage2_verdict
+      ? `Stage 2 detected ${verdictLabel(scan.stage2_verdict).toLowerCase()}`
+      : "Full scan result available";
   }
   return scan.verdict === "malicious" ? "Malicious site detected" : "Suspicious site needs review";
 }
 
 function overlaySupportCopy(scan: LocalScanRecord) {
   if (scan.verdict === "needs_review" || scan.consistency_status === "conflict") {
-    return "The fast URL precheck looked safer than the deeper page review. Treat this as a review state, verify the destination independently, and continue only if you trust it.";
+    return "The fast URL precheck and the deeper page review disagreed, so the stored final state remains review-safe while this card shows the actual Stage 2 result from the system.";
   }
   if (scan.verdict === "malicious") {
     return "Non-visual URL, content, structural, and safe-filter signals align strongly enough to recommend leaving this page unless you explicitly trust it.";
   }
   return "This page is not conclusively malicious, but it triggered enough non-visual risk signals to slow down and verify before entering data.";
+}
+
+function displayVerdict(scan: LocalScanRecord): Verdict | StageVerdict {
+  if ((scan.verdict === "needs_review" || scan.consistency_status === "conflict") && scan.stage2_verdict) {
+    return scan.stage2_verdict;
+  }
+  return scan.verdict;
 }
 
 function OverlayApp({
@@ -221,26 +230,27 @@ function OverlayApp({
   if (state.mode === "error") {
     return (
       <div className="phishguard-indicator phishguard-indicator-error">
-        <strong>PhishGuard needs review</strong>
+        <strong>PhishGuard scan issue</strong>
         <div className="phishguard-muted">{state.message}</div>
       </div>
     );
   }
 
   const { scan, allowContinueOnMalicious } = state;
-  const blocking = isBlockingVerdict(scan.verdict);
+  const visibleVerdict = displayVerdict(scan);
+  const blocking = isBlockingVerdict(visibleVerdict);
   const canContinue = !blocking || allowContinueOnMalicious;
 
   return (
     <div className={blocking ? "phishguard-backdrop" : "phishguard-floating-shell"}>
-      <section className={`phishguard-card phishguard-card-${scan.verdict}`} role="dialog" aria-modal={blocking}>
+      <section className={`phishguard-card phishguard-card-${visibleVerdict}`} role="dialog" aria-modal={blocking}>
         <div className="phishguard-card-header">
           <div className="phishguard-heading-group">
             <div className="phishguard-eyebrow">PhishGuard Live Review</div>
             <h1>{overlayHeadline(scan)}</h1>
             <p className="phishguard-section-note">{overlaySupportCopy(scan)}</p>
           </div>
-          <VerdictBadge verdict={scan.verdict} />
+          <VerdictBadge verdict={visibleVerdict} />
         </div>
 
         <div className="phishguard-hero-shell">
@@ -273,6 +283,10 @@ function OverlayApp({
             <div className="phishguard-stat-card">
               <span className="phishguard-label">Decision threshold</span>
               <strong className="phishguard-stat-value">{scoreToPercent(scan.threshold)}</strong>
+            </div>
+            <div className="phishguard-stat-card">
+              <span className="phishguard-label">System result</span>
+              <strong className="phishguard-stat-value">{verdictLabel(visibleVerdict)}</strong>
             </div>
             <div className="phishguard-stat-card">
               <span className="phishguard-label">Filter reason</span>
@@ -353,52 +367,64 @@ function mountUi() {
         _sender: chrome.runtime.MessageSender,
         sendResponse: (response?: unknown) => void,
       ) => {
-        void (async () => {
-          if (message.type === "REQUEST_PAGE_CONTENT") {
-            await waitForStablePage(
-              message.payload.readyTimeoutMs,
-              message.payload.stabilityDelayMs,
-              message.payload.stabilityTimeoutMs,
-            );
-            const payload: PageContentPayload = {
-              url: window.location.href,
-              title: document.title,
-              text_clean: extractVisibleText(message.payload.maxVisibleTextChars),
-              text_raw: extractRawHtml(message.payload.maxRawHtmlChars),
-            };
-            sendResponse(payload);
-            return;
-          }
+        if (message.type === "REQUEST_PAGE_CONTENT") {
+          void (async () => {
+            try {
+              await waitForStablePage(
+                message.payload.readyTimeoutMs,
+                message.payload.stabilityDelayMs,
+                message.payload.stabilityTimeoutMs,
+              );
+              const payload: PageContentPayload = {
+                url: window.location.href,
+                title: document.title,
+                text_clean: await extractVisibleText(message.payload.maxVisibleTextChars),
+                text_raw: await extractRawHtml(message.payload.maxRawHtmlChars),
+              };
+              sendResponse(payload);
+            } catch (error) {
+              sendResponse({
+                error: error instanceof Error ? error.message : "Could not collect page content.",
+              });
+            }
+          })();
+          return true;
+        }
 
-          if (message.type === "SHOW_OVERLAY") {
-            setState({
-              mode: "overlay",
-              scan: message.payload.scan,
-              allowContinueOnMalicious: message.payload.allowContinueOnMalicious,
-            });
-            return;
-          }
+        if (message.type === "SHOW_OVERLAY") {
+          setState({
+            mode: "overlay",
+            scan: message.payload.scan,
+            allowContinueOnMalicious: message.payload.allowContinueOnMalicious,
+          });
+          sendResponse({ ok: true });
+          return false;
+        }
 
-          if (message.type === "SHOW_SAFE_INDICATOR") {
-            setState({
-              mode: "indicator",
-              verdict: message.payload.verdict,
-              score: message.payload.score,
-              reason: message.payload.reason,
-            });
-            return;
-          }
+        if (message.type === "SHOW_SAFE_INDICATOR") {
+          setState({
+            mode: "indicator",
+            verdict: message.payload.verdict,
+            score: message.payload.score,
+            reason: message.payload.reason,
+          });
+          sendResponse({ ok: true });
+          return false;
+        }
 
-          if (message.type === "SHOW_SCAN_ERROR") {
-            setState({ mode: "error", message: message.payload.message });
-            return;
-          }
+        if (message.type === "SHOW_SCAN_ERROR") {
+          setState({ mode: "error", message: message.payload.message });
+          sendResponse({ ok: true });
+          return false;
+        }
 
-          if (message.type === "CLEAR_PAGE_UI") {
-            setState({ mode: "idle" });
-          }
-        })();
-        return true;
+        if (message.type === "CLEAR_PAGE_UI") {
+          setState({ mode: "idle" });
+          sendResponse({ ok: true });
+          return false;
+        }
+
+        return false;
       };
 
       chrome.runtime.onMessage.addListener(listener);
